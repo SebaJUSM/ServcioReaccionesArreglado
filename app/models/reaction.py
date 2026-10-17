@@ -35,14 +35,14 @@ class Reaction(Base):
 
     # ID primario. Lo autogeneramos usando la función generate_uuid() por defecto.
     id = Column(String, primary_key=True, index=True, default=generate_uuid)
-    
-    # Índices (index=True) agregados para agilizar las búsquedas 
+
+    # Índices (index=True) agregados para agilizar las búsquedas
     # frecuentemente usadas (ej. obtener reacciones por mensaje o por usuario).
     message_id = Column(String, index=True, nullable=False)
     user_id = Column(String, index=True, nullable=False)
-    
+
     reaction_type = Column(String, nullable=False)
-    
-    # Fecha de creación. 'server_default=func.now()' delegará a la base de datos 
+
+    # Fecha de creación. 'server_default=func.now()' delegará a la base de datos
     # la tarea de rellenarlo con la hora actual al insertar.
     created_at = Column(DateTime(timezone=True), server_default=func.now())

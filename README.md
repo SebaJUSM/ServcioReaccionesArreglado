@@ -1,7 +1,7 @@
 # Servicio de Reacciones
 
 Una unica API REST con FastAPI para crear, consultar y eliminar reacciones a
-mensajes de chat. El codigo de la aplicacion esta en `app/`.
+mensajes de chat. Version actual: **1.0.1**, definida en [VERSION](VERSION).
 
 ## Ejecutar
 
@@ -9,15 +9,16 @@ mensajes de chat. El codigo de la aplicacion esta en `app/`.
 docker compose up --build
 ```
 
-Docker Compose levanta la aplicacion `reaction-service` y RabbitMQ como broker
-para sus eventos. Son dos contenedores para una sola API de negocio.
-La persistencia de las reacciones usa SQLite en un volumen de Docker.
+Compose levanta la API `reaction-service` y su broker RabbitMQ. La API utiliza
+SQLite con persistencia en un volumen. Los eventos pendientes se guardan en la
+misma base y se reintentan desde una tarea interna de FastAPI.
 
 - API: <http://localhost:8000>
-- Swagger UI: <http://localhost:8000/docs>
-- RabbitMQ Management: <http://localhost:15672>
+- Swagger y esquemas: <http://localhost:8000/docs>
+- ReDoc: <http://localhost:8000/redoc>
+- RabbitMQ Management: <http://localhost:15672> (desarrollo: `reactions/reactions_dev`).
 
-## Endpoints REST
+## Endpoints
 
 - `GET /health`
 - `POST /api/v1/reactions`
@@ -26,10 +27,18 @@ La persistencia de las reacciones usa SQLite en un volumen de Docker.
 
 ## Documentacion
 
-- [Configuracion, ejecucion local y ejemplos](README-ReactionService.md).
-- [Arreglos, validaciones y cautelas](INFORME_ARREGLOS.txt).
-- `.env.example` contiene las variables para desarrollo local.
+- [Configuracion, errores y ejecucion local](README-ReactionService.md).
+- [Arquitectura y modelo de datos](docs/ARQUITECTURA.md).
+- [Esquemas y contratos HTTP, eventos y SQL](docs/ESQUEMAS.md).
+- [Historial de versiones](CHANGELOG.md).
+- [Arreglos, verificaciones y cautelas](INFORME_ARREGLOS.txt).
 
-La validacion HTTP de usuarios y mensajes se integra con servicios externos
-configurables. Esos servicios no forman parte de este proyecto; el modo local
-usa validacion simulada por defecto.
+## Pruebas y contratos
+
+```bash
+python -m unittest discover -v
+python scripts/export_schemas.py
+```
+
+Las pruebas automatizadas usan bases temporales y conexiones externas simuladas.
+Las comprobaciones con contenedores se describen en la guia detallada.

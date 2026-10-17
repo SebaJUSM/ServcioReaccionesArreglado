@@ -11,10 +11,10 @@ Modifica este archivo si necesitas:
 - Cambiar cómo se muestra la información al devolver un GET.
 """
 
-import re
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 class ReactionBase(BaseModel):
     """
@@ -22,22 +22,15 @@ class ReactionBase(BaseModel):
     """
     message_id: str = Field(..., min_length=1, max_length=128, description="ID del mensaje al cual se reacciona", examples=["msg-1234"])
     user_id: str = Field(..., min_length=1, max_length=128, description="ID del usuario que realiza la reacción", examples=["usr-5678"])
-    reaction_type: str = Field(..., min_length=1, max_length=32, description="Tipo de reacción (ej: like, heart, sad)", examples=["like"])
+    reaction_type: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-z0-9_-]+$", description="Nombre de reaccion; se normaliza a minusculas (ej: like, heart, sad)", examples=["like"])
 
     @field_validator("message_id", "user_id", "reaction_type", mode="before")
     @classmethod
-    def normalize_text(cls, value: str) -> str:
+    def normalize_text(cls, value: Any, info: ValidationInfo) -> Any:
         if not isinstance(value, str):
             return value
-        return value.strip()
-
-    @field_validator("reaction_type")
-    @classmethod
-    def validate_reaction_type(cls, value: str) -> str:
-        normalized = value.lower()
-        if not re.fullmatch(r"[a-z0-9_-]+", normalized):
-            raise ValueError("reaction_type only supports letters, numbers, hyphen and underscore")
-        return normalized
+        normalized = value.strip()
+        return normalized.lower() if info.field_name == "reaction_type" else normalized
 
 class ReactionCreate(ReactionBase):
     """

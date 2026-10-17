@@ -1,24 +1,13 @@
-"""
-Productor de Eventos.
+"""RabbitMQ publisher with bounded retries and a durable event queue."""
 
-Este módulo se encarga de aislar la lógica de publicación de eventos hacia
-el Message Broker (RabbitMQ, Kafka, etc.). Los eventos se emiten para notificar
-a otros microservicios que "algo ocurrió" (ej: Reacción creada).
-
-Modifica este archivo si necesitas:
-- Instanciar un cliente real de RabbitMQ (pika, aio_pika) o Kafka (confluent-kafka).
-- Cambiar el formato o estructura de cómo se serializa el evento (ej: agregar metadatos).
-"""
-
-import json
-import logging
 import asyncio
-from app.core.config import settings
-from app.core.errors import EventPublishError
-from datetime import datetime, timezone
-from typing import Any
+import logging
 
 import aio_pika
+
+from app.core.config import settings
+from app.core.errors import EventPublishError
+from app.schemas.event import ReactionEvent
 
 logger = logging.getLogger(__name__)
 
@@ -28,91 +17,112 @@ class RabbitMQEventProducer:
         self.connection: aio_pika.abc.AbstractRobustConnection | None = None
         self.channel: aio_pika.abc.AbstractRobustChannel | None = None
         self.exchange: aio_pika.abc.AbstractRobustExchange | None = None
+        self._ready = False
+        self._lock = asyncio.Lock()
 
     @property
     def is_connected(self) -> bool:
-        return bool(self.connection and not self.connection.is_closed)
+        return bool(
+            self._ready
+            and self.connection
+            and not self.connection.is_closed
+            and self.connection.connected.is_set()
+            and self.channel
+            and not self.channel.is_closed
+            and self.exchange
+        )
 
-    async def connect(self) -> None:
+    async def _connect_locked(self) -> None:
         if not settings.EVENTS_ENABLED or self.is_connected:
             return
-
+        await self._close_locked()
         try:
-            self.connection = await aio_pika.connect_robust(settings.EVENT_BROKER_URL)
-            self.channel = await self.connection.channel(publisher_confirms=True)
-            self.exchange = await self.channel.declare_exchange(
-                settings.EVENT_EXCHANGE,
-                aio_pika.ExchangeType.TOPIC,
-                durable=True,
-            )
-            logger.info("Conectado a RabbitMQ exchange=%s", settings.EVENT_EXCHANGE)
-        except Exception as exc:
-            await self.close()
-            message = "No se pudo conectar a RabbitMQ"
-            if settings.EVENTS_REQUIRED:
-                raise EventPublishError(message, details={"error": str(exc)}) from exc
-            logger.warning("%s: %s", message, exc)
+            async with asyncio.timeout(settings.EVENT_TIMEOUT_SECONDS):
+                self.connection = await aio_pika.connect_robust(
+                    settings.EVENT_BROKER_URL,
+                    timeout=settings.EVENT_TIMEOUT_SECONDS,
+                )
+                self.channel = await self.connection.channel(
+                    publisher_confirms=True, on_return_raises=True
+                )
+                self.exchange = await self.channel.declare_exchange(
+                    settings.EVENT_EXCHANGE, aio_pika.ExchangeType.TOPIC, durable=True
+                )
+                queue = await self.channel.declare_queue(settings.EVENT_QUEUE, durable=True)
+                await queue.bind(
+                    self.exchange, routing_key=f"{settings.EVENT_ROUTING_KEY_PREFIX}.#"
+                )
+                self._ready = True
+            logger.info("Connected to RabbitMQ exchange=%s", settings.EVENT_EXCHANGE)
+        except (Exception, asyncio.CancelledError) as exc:
+            await self._close_locked()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            logger.warning("RabbitMQ connection failed: %s", exc)
+            raise EventPublishError("RabbitMQ is unavailable") from exc
 
-    async def close(self) -> None:
-        if self.connection and not self.connection.is_closed:
-            await self.connection.close()
+    async def connect(self) -> None:
+        async with self._lock:
+            await self._connect_locked()
+
+    async def _close_locked(self) -> None:
+        connection = self.connection
+        self._ready = False
         self.connection = None
         self.channel = None
         self.exchange = None
-
-    async def publish(self, event_type: str, data: dict[str, Any]) -> bool:
-        if not settings.EVENTS_ENABLED:
-            logger.info("Eventos deshabilitados; no se publica %s", event_type)
-            return False
-
-        event = {
-            "event_type": event_type,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "data": data,
-        }
-        body = json.dumps(event, default=str).encode("utf-8")
-        routing_key = f"{settings.EVENT_ROUTING_KEY_PREFIX}.{event_type.lower()}"
-        last_error: Exception | None = None
-
-        for attempt in range(1, settings.EVENT_PUBLISH_RETRIES + 1):
+        if connection and not connection.is_closed:
             try:
-                if not self.is_connected or self.exchange is None:
-                    await self.connect()
-                if self.exchange is None:
-                    raise RuntimeError("RabbitMQ exchange is not available")
+                await asyncio.wait_for(connection.close(), settings.EVENT_TIMEOUT_SECONDS)
+            except Exception:
+                logger.warning("Could not close RabbitMQ connection cleanly", exc_info=True)
 
-                await self.exchange.publish(
-                    aio_pika.Message(
-                        body=body,
-                        content_type="application/json",
-                        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                    ),
-                    routing_key=routing_key,
-                )
-                logger.info("Evento publicado en RabbitMQ routing_key=%s", routing_key)
-                return True
-            except Exception as exc:
-                last_error = exc
-                logger.warning(
-                    "Fallo publicando evento %s intento %s/%s: %s",
-                    event_type,
-                    attempt,
-                    settings.EVENT_PUBLISH_RETRIES,
-                    exc,
-                )
-                await self.close()
-                if attempt < settings.EVENT_PUBLISH_RETRIES:
-                    await asyncio.sleep(settings.EVENT_PUBLISH_RETRY_DELAY_SECONDS)
+    async def close(self) -> None:
+        async with self._lock:
+            await self._close_locked()
 
-        details = {"routing_key": routing_key, "error": str(last_error)}
-        if settings.EVENTS_REQUIRED:
-            raise EventPublishError("No se pudo publicar el evento en RabbitMQ", details=details)
-
-        logger.error("Evento no publicado en RabbitMQ: %s", json.dumps(details))
+    async def publish(self, event: ReactionEvent) -> bool:
+        if not settings.EVENTS_ENABLED:
+            return False
+        routing_key = f"{settings.EVENT_ROUTING_KEY_PREFIX}.{event.event_type.lower()}"
+        async with self._lock:
+            for attempt in range(1, settings.EVENT_PUBLISH_RETRIES + 1):
+                try:
+                    await self._connect_locked()
+                    async with asyncio.timeout(settings.EVENT_TIMEOUT_SECONDS):
+                        await self.exchange.publish(
+                            aio_pika.Message(
+                                body=event.model_dump_json().encode("utf-8"),
+                                message_id=event.event_id,
+                                content_type="application/json",
+                                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                            ),
+                            routing_key=routing_key,
+                            mandatory=True,
+                            timeout=settings.EVENT_TIMEOUT_SECONDS,
+                        )
+                    return True
+                except Exception:
+                    logger.warning(
+                        "Event %s delivery failed (%s/%s)",
+                        event.event_id, attempt, settings.EVENT_PUBLISH_RETRIES,
+                        exc_info=True,
+                    )
+                    await self._close_locked()
+                    if attempt < settings.EVENT_PUBLISH_RETRIES:
+                        await asyncio.sleep(settings.EVENT_PUBLISH_RETRY_DELAY_SECONDS)
         return False
 
 
 event_producer = RabbitMQEventProducer()
+
+
+async def require_event_broker() -> None:
+    if settings.EVENTS_ENABLED and settings.EVENTS_REQUIRED:
+        try:
+            await asyncio.wait_for(event_producer.connect(), settings.EVENT_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            raise EventPublishError("RabbitMQ availability check timed out") from exc
 
 
 async def connect_event_producer() -> None:
@@ -121,10 +131,3 @@ async def connect_event_producer() -> None:
 
 async def close_event_producer() -> None:
     await event_producer.close()
-
-
-async def emit_reaction_event(event_type: str, data: dict[str, Any]) -> bool:
-    """
-    Empaqueta y envía un evento a RabbitMQ.
-    """
-    return await event_producer.publish(event_type, data)

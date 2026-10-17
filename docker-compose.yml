@@ -1,6 +1,9 @@
 services:
   rabbitmq:
     image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-reactions}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-reactions_dev}
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -18,19 +21,22 @@ services:
       - "8000:8000"
     depends_on:
       rabbitmq:
-        condition: service_healthy
+        condition: service_started
     environment:
       - PROJECT_NAME=Reaction Service
       - DATABASE_URL=sqlite+aiosqlite:///./data/reactions.db
       - DATABASE_ECHO=false
-      - EXTERNAL_VALIDATION_ENABLED=false
-      - MESSAGES_SERVICE_URL=http://messages-service:8000/api/v1/messages
-      - USERS_SERVICE_URL=http://users-service:8000/api/v1/users
-      - EVENTS_ENABLED=true
-      - EVENTS_REQUIRED=false
-      - EVENT_BROKER_URL=amqp://guest:guest@rabbitmq:5672/
-      - EVENT_EXCHANGE=reactions
-      - EVENT_ROUTING_KEY_PREFIX=reaction
+      - EXTERNAL_VALIDATION_ENABLED=${EXTERNAL_VALIDATION_ENABLED:-false}
+      - MESSAGES_SERVICE_URL=${MESSAGES_SERVICE_URL:-http://messages-service:8000/api/v1/messages}
+      - USERS_SERVICE_URL=${USERS_SERVICE_URL:-http://users-service:8000/api/v1/users}
+      - EVENTS_ENABLED=${EVENTS_ENABLED:-true}
+      - EVENTS_REQUIRED=${EVENTS_REQUIRED:-false}
+      - EVENT_BROKER_URL=amqp://${RABBITMQ_DEFAULT_USER:-reactions}:${RABBITMQ_DEFAULT_PASS:-reactions_dev}@rabbitmq:5672/
+      - EVENT_EXCHANGE=${EVENT_EXCHANGE:-reactions}
+      - EVENT_QUEUE=${EVENT_QUEUE:-reactions.events}
+      - EVENT_ROUTING_KEY_PREFIX=${EVENT_ROUTING_KEY_PREFIX:-reaction}
+      - EVENT_TIMEOUT_SECONDS=${EVENT_TIMEOUT_SECONDS:-3}
+      - OUTBOX_POLL_INTERVAL_SECONDS=${OUTBOX_POLL_INTERVAL_SECONDS:-1}
     volumes:
       - reaction-data:/app/data
     healthcheck:

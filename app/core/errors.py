@@ -1,10 +1,13 @@
 import logging
 from typing import Any
 
-from fastapi import HTTPException, Request, status
+from fastapi import Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.exceptions import HTTPException
+
+from app.schemas.error import ValidationIssue
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +95,7 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError) 
         content=build_error_payload(
             "validation_error",
             "Request validation failed",
-            exc.errors(),
+            [ValidationIssue.model_validate(error).model_dump(mode="json") for error in exc.errors()],
         ),
     )
 

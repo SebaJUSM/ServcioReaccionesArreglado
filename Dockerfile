@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar el código
 COPY ./app ./app
+COPY VERSION ./VERSION
 RUN mkdir -p /app/data && useradd --create-home --shell /usr/sbin/nologin appuser && chown -R appuser:appuser /app
 USER appuser
 
